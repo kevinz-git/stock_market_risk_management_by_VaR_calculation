@@ -1,0 +1,1095 @@
+---
+title: "STAT 5261 Final Project: \n AI & Microchip Technology Industry Asset Allocation with Risk Management"
+author: 'Group Members'
+date: "2023-05-05"
+output:
+  html_document: default
+  pdf_document: 
+    latex_engine: xelatex
+---
+
+## 1. Summary
+
+## 2. Descriptive Statistics
+
+### Load libraires
+
+```{r}
+
+# Load necessary libraries
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+
+library(stats)
+library(tseries)
+library(fGarch)
+library(MASS)
+library(VGAM)
+library(extraDistr)
+library(fitdistrplus)
+library(Rsolnp)
+library(metRology)
+
+
+library(xts)
+library(PerformanceAnalytics)
+library(reshape2)
+library(FactoMineR)
+library(matrixStats)
+library(psych)
+library(rugarch)
+library(copula)
+library(xts)
+library(Ecdat)
+library(quadprog)
+library(CVXR)
+library(GGally)
+library(FactoMineR)
+
+
+```
+
+### Read Dataset
+
+```{r}
+# Set Working Directory
+setwd("C:\\Users\\Zhixing Zhou\\Desktop\\TC - Spring Courses\\STAT 5261 Statistical Methods for Finance\\Final Project")
+# Read stock dataset
+stock_data <- read_csv("ai_microchip_technology_stocks.csv") %>% 
+  mutate(Date = as.Date(Date, format = "%Y-%m-%d %H:%M:%S"))
+
+# Read risk-free rate dataset
+risk_free_data <- read_csv("bill-rates-2002-2021.csv") %>% 
+  mutate(Date = as.Date(Date, format = "%m/%d/%y"))
+
+# Load S&P 500 data
+sp500_data <- read_csv("sp500_monthly_returns_2015_2020.csv") %>% 
+  mutate(Date = as.Date(Date, format = "%m/%d/%y")) # "adj close" column is the return of S&P 500
+
+# Calculate monthly returns
+stock_data_xts <- xts::xts(stock_data[,-1], order.by = stock_data$Date)
+monthly_returns <- PerformanceAnalytics::Return.calculate(stock_data_xts, method = "discrete") * 100
+
+
+# Convert the S&P 500 data to xts format and calculate returns
+sp500_xts <- xts(sp500_data[,-1], order.by = sp500_data$Date)
+sp500_xts$`Adj Close`<-sp500_xts$`Adj Close`*100
+# Combine asset returns and S&P 500 returns
+combined_returns <- merge.xts(monthly_returns, sp500_xts )
+
+colnames(combined_returns)[ncol(combined_returns)] <- "^GSPC" #What is "^GSPC" column useful for : it's ticket symbol for S&P 500 index 
+
+# Calculate normal returns for each column except Date and last column
+stock_data_ret <- stock_data %>% dplyr::select(-Date) %>%  dplyr::mutate(dplyr::across(everything(), ~diff(.)/lag(.))) 
+stock_data_ret <- slice(stock_data_ret, 1:(nrow(stock_data_ret)-1))
+# remove Date and last column # calculate normal returns
+
+# Merge stock_data and sp500_data
+#stock_data_with_sp500 <- merge(stock_data_ret, sp500_data)
+monthly_returns_df <- data.frame(Date = index(monthly_returns), zoo::coredata(monthly_returns))
+monthly_returns_df <- monthly_returns_df %>%
+  mutate_at(vars(-1), ~./100) # divide by 100 except first column
+monthly_returns_df <- slice(monthly_returns_df, 2:n())
+stock_data_with_sp500 <- merge(sp500_data, monthly_returns_df, by = "Date")
+
+
+```
+
+
+
+### Calculate Descriptive Statistics
+2.1 Report: sample statistics for each asset ( Means, Std. deviations, skewness, kurtosis, beta ) and S&P 500 equity curve for each asset and S&P 500 (a curve that shows the growth of a \$1 in the asset over the time period)
+
+Comment on the results: Comment Compare asset with S&P 500
+
+2.2 Test for stationarity:
+
+Fit Distributions: whether the assets' returns look normally distributed, are there outliers in assets' data, fit other distributions to the data , find out which one fits better
+
+2.3 Sharpe's Slope: sharpe's slope for each asset, which asset has the highest slope
+
+Comment on the sharpe ratio result?: (convert to annual sample means, annual sample standard deviation?) comment on the annual sample means and standard deviation?
+
+```{r}
+# Basic Descriptive Statistics
+stats <- data.frame(Asset = colnames(combined_returns),
+                    Mean = colMeans(combined_returns, na.rm = TRUE),
+                    SD = apply(combined_returns, 2, sd, na.rm = TRUE),
+                    Skewness = apply(combined_returns, 2, skewness, na.rm = TRUE),
+                    Kurtosis = apply(combined_returns, 2, kurtosis, na.rm = TRUE))
+
+
+```
+
+```{r}
+# Calculate beta for each asset
+cov_matrix <- cov(combined_returns, use = "complete.obs")
+beta <- cov_matrix / cov_matrix["^GSPC", "^GSPC"] # In regression, beta = Cov(X,Y)/ Var(X)
+# # Add beta to the stats dataframe
+stats$Beta <- beta[, "^GSPC"] # "^GSPC" is used to fill the betas
+
+#Compute Sharpe's slope for each asset
+#Monthly Risk-Free Rate = (1 + 0.0094)^(1/12) - 1 = 0.000776 or 0.0776%
+# sharpe_slopes <- (stats$Mean - 0.000776) / stats$SD
+# stats$sharpe_slopes <- sharpe_slopes
+#Convert monthly sample means and SDs into annual estimates
+stats$Annual_Mean <- stats$Mean * 12
+stats$Annual_SD <- stats$SD * sqrt(12)
+# Compute Sharpe ratios for each asset
+sharpe_ratios <- (stats$Annual_Mean - 0.0094) / stats$Annual_SD
+stats$Sharpe_Ratio <- sharpe_ratios
+# Identify the asset with the highest Sharpe ratio
+max_sharpe_asset <- stats[which.max(sharpe_ratios), "Asset"]
+max_sharpe_ratio <- max(sharpe_ratios)
+cat("The asset with the highest Sharpe ratio is", max_sharpe_asset, "with a Sharpe ratio of", max_sharpe_ratio, "\n")
+
+
+```
+
+```{r}
+# Plot monthly returns
+combined_returns_df <- data.frame(Date = index(combined_returns), zoo::coredata(combined_returns))
+par(mfrow=c(4,4))
+  for (asset in colnames(combined_returns_df[2:17])) {
+    plot(combined_returns_df$Date, combined_returns_df[,asset], type = "l", pch = 19, 
+         col = "black", xlab = "Date", ylab = asset)
+    title(paste("Monthly Returns of", asset))
+  }
+par(mfrow=c(4,4))
+  for (asset in colnames(combined_returns_df[2:17])) {
+    hist(combined_returns_df[,asset], pch = 19, 
+         col = "black", xlab = asset, main = paste("Monthly Returns of", asset))
+  }
+
+# Plot monthly prices
+
+stock_data_df<-as.data.frame(stock_data)
+par(mfrow=c(4,4))
+for (asset in colnames(stock_data_df[2:16])) {
+    plot(stock_data_df$Date, stock_data_df[,asset], type = "l", pch = 19, 
+         col = "black", xlab = "Date", ylab = asset)
+    title(paste("Monthly Prices of", asset))
+  }
+
+```
+
+```{r}
+# Calculate equity curves
+stock_data_with_sp500 <- stock_data_with_sp500[, -1]
+equity_curves <- cumprod(1 + stock_data_with_sp500)
+
+
+equity_curves_df <- data.frame(Date = index(equity_curves), coredata(equity_curves))
+
+# Plot equity curves for each asset
+equity_curves_df <- equity_curves_df %>% rename("^GSPC" = "Adj.Close")
+par(mfrow=c(4,4))
+for (asset in colnames(equity_curves_df[,2:17])) {
+    plot(equity_curves_df$Date, equity_curves_df[,asset], type = "l", pch = 19, 
+         col = "black", xlab = "Date", ylab = asset)
+   title(paste("Equity Curve of", asset))
+  }
+
+
+```
+
+```{r}
+#Test for stationarity: Augmented Dickey-Fuller test
+stationarity_tests <- data.frame(Asset = colnames(combined_returns),
+                                 stationary_p_value = apply(combined_returns, 2, function(x) adf.test(na.omit(x), alternative = "stationary")$p.value))
+
+#the p-value returned by the test is less than a chosen significance level, then the null hypothesis of non-stationarity is rejected and the time series is considered stationary.
+
+stationarity_tests_prt<- stationarity_tests%>% dplyr::select(-Asset) 
+round(stationarity_tests_prt, digits=4)
+
+
+
+```
+
+```{r}
+#Fit different distributions to each set of returns
+
+combined_returns_df2<- combined_returns_df[-1,-1]
+data <-combined_returns_df2
+dists <- c("norm", "t", "ged") # Normal, Student's t, and Generalized Error Distribution (GED)
+
+fits <- matrix(NA, nrow = ncol(data), ncol = length(dists))
+f_AIC <- matrix(NA, nrow = ncol(data), ncol = length(dists))
+f_BIC <- matrix(NA, nrow = ncol(data), ncol = length(dists))
+colnames(fits) <- dists
+rownames(fits) <- colnames(data)
+for (i in 1:ncol(data)) {
+fit <- suppressWarnings(fitdistrplus::fitdist(data[,i], dists[1]))
+fits[i,1] <- fit$loglik*-1
+
+}
+
+
+for (j in 1:ncol(data)) {
+fit <- suppressWarnings(fitdistrplus::fitdist(data[,j], "t.scaled",
+start=list(df=3,mean=mean(data[,j]),sd=sd(data[,j]))))
+fits[j,2] <- fit$loglik*-1
+
+}
+
+for (k in 1:ncol(data)) {
+loglik=function(beta) sum(-fGarch::dged(data[,k],mean=beta[1],sd=beta[2],nu=beta[3],log=TRUE))
+start=c(mean(data[,k]),sd(data[,k]),1)
+fit=optim(start,loglik,hessian=T,method='L-BFGS-B',lower=c(-0.1,0.01,1))
+fits[k,3] <- fit$value
+
+}
+
+best <- as.data.frame(apply(fits, 1, which.max)) 
+colnames(best)[1]<- "fit"
+best$fit<- best$fit %>% dplyr::recode( '1'='normal','2'='t','3'='ged')
+best
+
+```
+```{r}
+#calculate VaR and ES (parametric, normal )
+
+VaRnormalEqwt <- function(returnVector, prob=.05, 
+    notional=1, expected.return=mean(returnVector), 
+    digits=2)
+{
+  if(prob > .5) prob <- 1 - prob
+  ans <- -qnorm(prob, mean=expected.return, 
+    sd=sd(returnVector)) * notional
+  signif(ans, digits=digits)
+}
+ESnormalEqwt <- function(returnVector, prob=.05, 
+    notional=1, expected.return=mean(returnVector), 
+    digits=2)
+{
+  if(prob > .5) prob <- 1 - prob
+  retsd <- sd(returnVector)
+  v <- qnorm(prob, mean=expected.return, sd=retsd) 
+  tailExp <- integrate(function(x) 
+      x * dnorm(x, mean=expected.return, sd=retsd), 
+      -Inf, v)$value / prob
+  ans <- -tailExp * notional
+  signif(ans, digits=digits)
+}
+combined_returns_df3<- combined_returns_df[-1,-1]/100
+VaR_pa<-sapply(combined_returns_df3 ,function(x){VaRnormalEqwt(x,prob=.05,digits=5,notional=100000)})
+ES_pa<-sapply(combined_returns_df3 ,function(x){ESnormalEqwt(x,prob=.05,digits=5,notional=100000)})
+
+VaR_pa
+ES_pa
+```
+
+
+```{r}
+ #calculate VaR and ES (nonparametric, historical data )
+
+VaRhistorical <- function(returnVector, prob=.05, 
+    notional=1, digits=2) 
+{
+  if(prob > .5) prob <- 1 - prob
+  ans <- -quantile(returnVector, prob) * notional
+  signif(ans, digits=digits)
+}
+EShistorical <- function(returnVector, prob=.05, 
+    notional=1, digits=2) 
+{
+  if(prob > .5) prob <- 1 - prob
+  v <- quantile(returnVector, prob)
+  ans <- -mean(returnVector[returnVector <= v]) * 
+      notional
+  signif(ans, digits=digits)
+
+}
+combined_returns_df3<- combined_returns_df[-1,-1]/100
+VaR_non<-sapply(combined_returns_df3 ,function(x){VaRhistorical(x,prob=.05,digits=5,notional=100000)})
+ES_non<-sapply(combined_returns_df3 ,function(x){EShistorical(x,prob=.05,digits=5,notional=100000)})
+
+VaR_non
+ES_non
+
+```
+
+2.4 Display the result in a table.
+
+```{r}
+#print descriptive statistics
+stats_prt<-round((stats%>% dplyr::select(-Asset,-Mean,-SD)), digits=4)
+stats_prt$fit<- best$fit
+stats_prt$VaR_pa<-VaR_pa
+stats_prt$ES_pa<-ES_pa
+stats_prt$VaR_non<-VaR_non
+stats_prt$ES_non<-ES_non
+stats_prt$stationary_p_value<-round(stationarity_tests_prt$stationary_p_value,digits=4)
+stats_prt
+write.csv(stats_prt,file="2 descriptive stat.csv")
+
+```
+
+## 3. Portfolio Theory
+
+### Calculate Covariance Matrix of Assets
+
+```{r}
+#Sample covariance matrix of asset returns
+cov_matrix <- cov(na.omit(monthly_returns))
+#print(cov_matrix)
+#Pairwise scatter plots
+# Pairwise scatter plots between asset returns
+pairs_plot <- ggpairs(as.data.frame(na.omit(monthly_returns)))
+print(pairs_plot)
+
+```
+
+### Calculate Portfolios
+
+3.1 Minimum Variance Portfolio( not allow short selling): Compute MVP , estimate its mean, std. deviation of return, VaR, ES (annualize the monthly mean return and the risk)
+
+Comment: weights of the portfolio comment on mean return and risk of the portfolio relative to those of each asset
+
+VaR: calculate 5% VAR of \$100000 investment over a month, compare to VaR of individual assets
+
+
+3.2 Minimum Variance Portfolio (allow short selling): Compute MVP , estimate its mean, std. deviation of return, VaR, ES (annualize the monthly mean return and the risk)
+
+Comment: weights of the portfolio comment on mean return and risk of the portfolio relative to those of each asset
+
+VaR: calculate 5% VAR of \$100000 investment over a month, compare to VaR of individual assets
+
+3.3 Efficient frontier of the portfolio (allow and not allow short selling): calculate efficient frontier using estimated means , variances and covariances
+
+compare sharpe ratio of each asset and tangency portfolio using markowitz approach
+
+3.4 tangency portfolio(not allow short selling): compute tangency portfolio, its expected return, and std. deviation, and sharpe ratios
+
+Comment: sharpe ratio results
+### Calculate portfolios that doesn't allow short selling , with monthly data
+```{r}
+#portfolios that doesn't allow short selling , with monthly data
+
+#mean_vect=c(0.0427,0.0015,0.0285)
+mean_vect=as.vector(stats$Mean[1:15])/100
+#cov_mat=matrix(c(0.01,0.0018,0.0011,0.0018,(0.1044)^2,0.0026,0.0011,0.0026,(0.1411)^2),nrow=3,ncol=3,byrow=TRUE)
+cov_mat=cov(na.omit(monthly_returns)/100)
+#sd_vect = sqrt(diag(cov_mat))
+sd_vect = as.vector(stats$SD[1:15])/100
+```
+
+```{r}
+##efficient frontier  (efficient and inefficient portfolios)
+library(Ecdat)
+library(quadprog)
+Amat = cbind(rep(1,15),mean_vect,diag(1,nrow=15))  # set the constraints matrix # how to write Amat
+muP = seq(min(mean_vect)+0.0001,max(mean_vect)-0.0001,length=300)  # set of 300 possible target values  for the expect portfolio return
+sdP = muP # set up storage for std dev's of portfolio returns
+weights = matrix(0,nrow=300,ncol=15) #storage for portfolio weights
+for (i in 1:length(muP)) 
+{
+  bvec = c(1,muP[i],rep(-0,15))  # constraint vector
+  result =
+    solve.QP(Dmat=2*cov_mat,dvec=rep(0,15),Amat=Amat,bvec=bvec,meq=2)
+  sdP[i] = sqrt(result$value)
+  weights[i,] = result$solution
+}
+#find the optimal portfolios for each target expected return # How is this calculated? # how to write bvec
+#?solve.QP #Solve a Quadratic Programming Problem
+par(mfrow = c(1,1))
+##plot efficient frontier
+plot(sdP,muP,type="l",xlim=c(0,0.5),ylim=c(0,.08),lty=3)  #  plot the efficient frontier (and inefficient portfolios below the min var portfolio)
+
+mufree = 0.000776 # input value of risk-free interest rate
+#points(0,mufree,cex=4,pch="*")  # show risk-free asset
+
+#tangency portfolio
+#?points #points(x, y = NULL, type = "p", ...)
+sharpe =( muP-mufree)/sdP # compute Sharpe's ratios, also the slope of line between the point of portfolio and point of risk free asset 
+ind = (sharpe == max(sharpe)) # Find maximum Sharpe's ratio
+options(digits=5)
+muP[ind]
+weights[ind,] #  print the weights of the tangency portfolio #tangency portfolio 
+
+
+
+# tangency_no_short<-as.list(c(muP[ind]*12,sdP[ind]*sqrt(12),weights[ind,]))
+# names(tangency_no_short)<- c("Annual_Mean","Annual_SD",names(monthly_returns))
+# tangency_no_short
+
+#3.1
+#minimum variance portfolio
+ind2 = (sdP == min(sdP)) # find the minimum variance portfolio
+weights[ind2,]
+points(sdP[ind2],muP[ind2],cex=2,pch="+") # show min var portfolio
+muP[ind2]
+(sdP[ind2])^2
+
+```
+```{r}
+#calculate VaR and ES (nonparametric, historical data )
+VaRnormalEqwt1 <- function(sd=sd, prob=.05, 
+    notional=1, mean=mean, 
+    digits=2)
+{
+  if(prob > .5) prob <- 1 - prob
+  ans <- -qnorm(prob, mean=mean, 
+    sd=sd) * notional
+  signif(ans, digits=digits)
+}
+ESnormalEqwt1 <- function(sd=sd, prob=.05, 
+    notional=1, mean=mean, 
+    digits=2)
+{
+  if(prob > .5) prob <- 1 - prob
+  v <- qnorm(prob, mean=mean, sd=sd) 
+  tailExp <- integrate(function(x) 
+      x * dnorm(x, mean=mean, sd=sd), 
+      -Inf, v)$value / prob
+  ans <- -tailExp * notional
+  signif(ans, digits=digits)
+}
+VaR1<-VaRnormalEqwt1(sd=sdP[ind],prob=.05,notional = 100000, mean=muP[ind],digits=5)
+ES1<-ESnormalEqwt1(sd=sdP[ind],prob=.05,notional = 100000, mean=muP[ind],digits=5)
+print("Tangency Portfolio without Shorting")
+df_tan_no_short<-c(muP[ind]*12,sdP[ind]*sqrt(12),VaR1,ES1,weights[ind,],sharpe[ind]*sqrt(12))
+names(df_tan_no_short)<-c("Annual_Mean","Annual_SD","VaR_non","ES_non",names(monthly_returns),"Sharpe_Ratio")
+round(df_tan_no_short,4)
+
+VaR2<-VaRnormalEqwt1(sd=sdP[ind2],prob=.05,notional = 100000, mean=muP[ind2],digits=5)
+ES2<-ESnormalEqwt1(sd=sdP[ind2],prob=.05,notional = 100000, mean=muP[ind2],digits=5)
+print("MVP without Shorting")
+df_mvp_no_short<-c(muP[ind2]*12,sdP[ind2]*sqrt(12),VaR2,ES2,weights[ind2,],sharpe[ind2]*sqrt(12))
+names(df_mvp_no_short)<-c("Annual_Mean","Annual_SD","VaR_non","ES_non",names(monthly_returns),"Sharpe_Ratio")
+round(df_mvp_no_short,4)
+
+```
+
+```{r}
+#plotting
+#lines(c(0,sdP[ind]),c(mufree,muP[ind]),col="red",lwd=3)
+plot(sdP,muP,type="l",xlim=c(0,0.5),ylim=c(0,.08),lty=3)
+lines(c(0,2.5),mufree+c(0,2.5)*(muP[ind]-mufree)/sdP[ind],lwd=4,lty=1, col = "blue")
+#  plot the efficient frontier (and inefficient portfolios below the min var portfolio)
+# (0,mufree), (2,y) where (2,y) is on the line of tangency portfolio
+#?lines 
+# show line of optimal portfolio
+points(sdP[ind],muP[ind],cex=4,pch="*") # show tangency portfolio
+#minimum variance portfolio
+ind2 <- (sdP == min(sdP)) # find the minimum variance portfolio
+muP[ind2]
+weights[ind2,]
+points(sdP[ind2],muP[ind2],cex=2,pch="+") # show min var portfolio
+
+#efficient frontier (efficient portfolios)
+ind3 <- (muP > muP[ind2])
+front<-weights[ind3,]
+#head(front)
+lines(sdP[ind3],muP[ind3],type="l",xlim=c(0,.25),
+      ylim=c(0,.3),lwd=3, col = "red")  #  plot the efficient frontier
+
+#location of risky assets
+#?lines # xlim ylim set x and y axis limits
+# text(sd_vect[1],mean_vect[1],"GM",cex=1.15)
+# text(sd_vect[2],mean_vect[2],"F",cex=1.15)
+# text(sd_vect[3],mean_vect[3],"CAT",cex=1.15)
+# text(sd_vect[4],mean_vect[4],"UTX",cex=1.15)
+# text(sd_vect[5],mean_vect[5],"MRK",cex=1.15)
+# text(sd_vect[6],mean_vect[6],"IBM",cex=1.15)
+#graphics.off()
+```
+
+
+
+
+
+
+### Calculate portfolios that allow short selling , with monthly data
+```{r}
+# no constraints for percentage of asset and allow infinite short selling, devide muP into 10000 parts
+#mean_vect=c(0.0427,0.0015,0.0285)
+mean_vect=as.vector(stats$Mean[1:15])/100
+#cov_mat=matrix(c(0.01,0.0018,0.0011,0.0018,(0.1044)^2,0.0026,0.0011,0.0026,(0.1411)^2),nrow=3,ncol=3,byrow=TRUE)
+cov_mat=cov(na.omit(monthly_returns)/100)
+#sd_vect = sqrt(diag(cov_mat))
+sd_vect = as.vector(stats$SD[1:15])/100
+
+options(digits=5)
+library(Ecdat)
+library(quadprog)
+Amat = cbind(rep(1,15),mean_vect)  # set the constraints matrix # how to write Amat # no short selling to be set here at 0
+muP = seq(0,0.1,length=100000)  # set of possible target values  for the expect portfolio return # no short selling to be set here roughly at min(mean_vect) and max(mean_vect)
+sdP = muP # set up storage for std dev's of portfolio returns
+weights = matrix(0,nrow=100000,ncol=15) #storage for portfolio weights
+for (i in 1:length(muP))
+{
+  bvec = c(1,muP[i])  # constraint vector # no short selling to be set here at 1
+  result =
+    solve.QP(Dmat=2*cov_mat,dvec=rep(0,15),Amat=Amat,bvec=bvec,meq=2)
+  sdP[i] = sqrt(result$value)
+  weights[i,] = result$solution
+}
+
+#find the optimal portfolios for each target expected return # How is this calculated? # how to write bvec
+#?solve.QP #Solve a Quadratic Programming Problem
+par(mfrow = c(1,1))
+##plot efficient frontier
+plot(sdP,muP,type="l",xlim=c(0,0.5),ylim=c(0,.08),lty=3)  #  plot the efficient frontier (and inefficient portfolios below the min var portfolio)
+
+mufree = 0.000776 # input value of risk-free interest rate
+#points(0,mufree,cex=4,pch="*")  # show risk-free asset
+
+#tangency portfolio
+#?points #points(x, y = NULL, type = "p", ...)
+sharpe =( muP-mufree)/sdP # compute Sharpe's ratios, also the slope of line between the point of portfolio and point of risk free asset 
+ind = (sharpe == max(sharpe)) # Find maximum Sharpe's ratio
+options(digits=5)
+muP[ind]
+weights[ind,] #  print the weights of the tangency portfolio #tangency portfolio 
+
+
+#3.1
+#minimum variance portfolio
+ind2 = (sdP == min(sdP)) # find the minimum variance portfolio
+weights[ind2,]
+points(sdP[ind2],muP[ind2],cex=2,pch="+") # show min var portfolio
+muP[ind2]
+(sdP[ind2])^2
+```
+
+```{r}
+#calculate VaR and ES (nonparametric, historical data )
+VaRnormalEqwt1 <- function(sd=sd, prob=.05, 
+    notional=1, mean=mean, 
+    digits=2)
+{
+  if(prob > .5) prob <- 1 - prob
+  ans <- -qnorm(prob, mean=mean, 
+    sd=sd) * notional
+  signif(ans, digits=digits)
+}
+ESnormalEqwt1 <- function(sd=sd, prob=.05, 
+    notional=1, mean=mean, 
+    digits=2)
+{
+  if(prob > .5) prob <- 1 - prob
+  v <- qnorm(prob, mean=mean, sd=sd) 
+  tailExp <- integrate(function(x) 
+      x * dnorm(x, mean=mean, sd=sd), 
+      -Inf, v)$value / prob
+  ans <- -tailExp * notional
+  signif(ans, digits=digits)
+}
+VaR1<-VaRnormalEqwt1(sd=sdP[ind],prob=.05,notional = 100000, mean=muP[ind],digits=5)
+ES1<-ESnormalEqwt1(sd=sdP[ind],prob=.05,notional = 100000, mean=muP[ind],digits=5)
+print("Tangency Portfolio with Shorting")
+df_tan_short<-c(muP[ind]*12,sdP[ind]*sqrt(12),VaR1,ES1,weights[ind,],sharpe[ind]*sqrt(12))
+names(df_tan_short)<-c("Annual_Mean","Annual_SD","VaR_non","ES_non",names(monthly_returns),"Sharpe_Ratio")
+round(df_tan_short,4)
+
+VaR2<-VaRnormalEqwt1(sd=sdP[ind2],prob=.05,notional = 100000, mean=muP[ind2],digits=5)
+ES2<-ESnormalEqwt1(sd=sdP[ind2],prob=.05,notional = 100000, mean=muP[ind2],digits=5)
+print("MVP with Shorting")
+df_mvp_short<-c(muP[ind2]*12,sdP[ind2]*sqrt(12),VaR2,ES2,weights[ind2,],sharpe[ind2]*sqrt(12))
+names(df_mvp_short)<-c("Annual_Mean","Annual_SD","VaR_non","ES_non",names(monthly_returns),"Sharpe_Ratio")
+round(df_mvp_short,4)
+
+```
+
+
+```{r}
+#plotting
+#efficient frontier (efficient portfolios)
+ind3 = (muP > muP[ind2])
+front<-weights[ind3,]
+#head(front)  #  plot the efficient frontier (and inefficient portfolios below the min var portfolio)
+plot(sdP,muP,type="l",xlim=c(0,0.5),ylim=c(0,.08),lty=3) 
+lines(sdP[ind3],muP[ind3],type="l",xlim=c(0,.25),
+      ylim=c(0,.3),lwd=3, col = "red")  #  plot the efficient frontier
+
+# #efficient portfolio of  muP=0.0427
+# ind4= (0.0426995 < muP & muP < 0.0427005)
+# muP[ind4]
+# weights[ind4,]
+# sdP[ind4]
+mufree = 0.000776 # input value of risk-free interest rate
+#points(0,mufree,cex=4,pch="*")  # show risk-free asset
+
+#tangency portfolio
+#?points #points(x, y = NULL, type = "p", ...)
+sharpe =( muP-mufree)/sdP # compute Sharpe's ratios, also the slope of line between the point of portfolio and point of risk free asset 
+ind = (sharpe == max(sharpe)) # Find maximum Sharpe's ratio
+options(digits=5)
+weights[ind,] #  print the weights of the tangency portfolio #tangency portfolio 
+#lines(c(0,sdP[ind]),c(mufree,muP[ind]),col="red",lwd=3)
+plot(sdP,muP,type="l",xlim=c(0,0.5),ylim=c(0,.08),lty=3)  #  plot the efficient frontier (and inefficient portfolios below the min var portfolio)
+lines(c(0,2.5),mufree+c(0,2.5)*(muP[ind]-mufree)/sdP[ind],lwd=4,lty=1, col = "blue") # (0,mufree), (2,y) where (2,y) is on the line of tangency portfolio
+points(sdP[ind],muP[ind],cex=4,pch="*") # show tangency portfolio
+
+
+```
+
+
+3.4 Show the result: show the weights and statistics of each portfolio in tables
+
+```{r}
+portfolio_prt<- as.data.frame(cbind(df_mvp_no_short,df_tan_no_short,df_mvp_short,df_tan_short))
+round(portfolio_prt,4)
+write.csv(round(portfolio_prt,4),"3 portfolio_prt.csv")
+```
+
+## 4. Asset Allocation
+### Calculate portfolios that doesn't allow short selling , with monthly data
+```{r}
+#portfolios that doesn't allow short selling , with monthly data
+
+#mean_vect=c(0.0427,0.0015,0.0285)
+mean_vect=as.vector(stats$Mean[1:15])/100
+#cov_mat=matrix(c(0.01,0.0018,0.0011,0.0018,(0.1044)^2,0.0026,0.0011,0.0026,(0.1411)^2),nrow=3,ncol=3,byrow=TRUE)
+cov_mat=cov(na.omit(monthly_returns)/100)
+#sd_vect = sqrt(diag(cov_mat))
+sd_vect = as.vector(stats$SD[1:15])/100
+```
+
+```{r}
+##efficient frontier  (efficient and inefficient portfolios)
+library(Ecdat)
+library(quadprog)
+Amat = cbind(rep(1,15),mean_vect,diag(1,nrow=15))  # set the constraints matrix # how to write Amat
+muP = seq(min(mean_vect)+0.0001,max(mean_vect)-0.0001,length=300)  # set of 300 possible target values  for the expect portfolio return
+sdP = muP # set up storage for std dev's of portfolio returns
+weights = matrix(0,nrow=300,ncol=15) #storage for portfolio weights
+for (i in 1:length(muP)) 
+{
+  bvec = c(1,muP[i],rep(-0,15))  # constraint vector
+  result =
+    solve.QP(Dmat=2*cov_mat,dvec=rep(0,15),Amat=Amat,bvec=bvec,meq=2)
+  sdP[i] = sqrt(result$value)
+  weights[i,] = result$solution
+}
+#find the optimal portfolios for each target expected return # How is this calculated? # how to write bvec
+#?solve.QP #Solve a Quadratic Programming Problem
+par(mfrow = c(1,1))
+##plot efficient frontier
+plot(sdP,muP,type="l",xlim=c(0,2.5),ylim=c(0,.10),lty=3)  #  plot the efficient frontier (and inefficient portfolios below the min var portfolio)
+
+mufree = 0.000776 # input value of risk-free interest rate
+#points(0,mufree,cex=4,pch="*")  # show risk-free asset
+
+#tangency portfolio
+#?points #points(x, y = NULL, type = "p", ...)
+sharpe =( muP-mufree)/sdP # compute Sharpe's ratios, also the slope of line between the point of portfolio and point of risk free asset 
+ind = (sharpe == max(sharpe)) # Find maximum Sharpe's ratio
+options(digits=5)
+muP[ind]
+weights[ind,] #  print the weights of the tangency portfolio #tangency portfolio 
+```
+
+```{r}
+
+#lines(c(0,sdP[ind]),c(mufree,muP[ind]),col="red",lwd=3)
+plot(sdP,muP,type="l",xlim=c(0,2.5),ylim=c(0,.10),lty=3)
+lines(c(0,2.5),mufree+c(0,2.5)*(muP[ind]-mufree)/sdP[ind],lwd=4,lty=1, col = "blue")
+#  plot the efficient frontier (and inefficient portfolios below the min var portfolio)
+# (0,mufree), (2,y) where (2,y) is on the line of tangency portfolio
+#?lines 
+# show line of optimal portfolio
+points(sdP[ind],muP[ind],cex=4,pch="*") # show tangency portfolio
+#minimum variance portfolio
+ind2 <- (sdP == min(sdP)) # find the minimum variance portfolio
+muP[ind2]
+weights[ind2,]
+points(sdP[ind2],muP[ind2],cex=2,pch="+") # show min var portfolio
+
+#efficient frontier (efficient portfolios)
+ind3 <- (muP > muP[ind2])
+front<-weights[ind3,]
+#head(front)
+lines(sdP[ind3],muP[ind3],type="l",xlim=c(0,.25),
+      ylim=c(0,.3),lwd=3, col = "red")  #  plot the efficient frontier
+
+#location of risky assets
+#?lines # xlim ylim set x and y axis limits
+# text(sd_vect[1],mean_vect[1],"GM",cex=1.15)
+# text(sd_vect[2],mean_vect[2],"F",cex=1.15)
+# text(sd_vect[3],mean_vect[3],"CAT",cex=1.15)
+# text(sd_vect[4],mean_vect[4],"UTX",cex=1.15)
+# text(sd_vect[5],mean_vect[5],"MRK",cex=1.15)
+# text(sd_vect[6],mean_vect[6],"IBM",cex=1.15)
+#graphics.off()
+```
+
+### Calculation of efficient portfolio that has certain return with or without risk free assets
+4.1 Calculate the efficient portfolio that has return = 6% /year or 0.5% a month ( risky assets, no short sales) calculate how much is invested in each assets, monthly risk, monthly 5% VaR and ES based on \$100000 investment
+
+```{r}
+
+R_P= 0.005
+# R_P=w*mufree+(1-w)*muP[ind]
+#w=(R_P-muP[ind]) / (mufree-muP[ind])
+w= 0  
+#solve w
+effi<-c((1-w)*weights[ind,])
+names(effi)<-colnames(monthly_returns)
+print(effi)
+sum(effi)
+#find efficient portfolio
+sd_P=(1-w)*sdP[ind]
+sd_P
+
+```
+
+```{r}
+#calculate VaR and ES (nonparametric, historical data )
+VaRnormalEqwt1 <- function(sd=sd, prob=.05, 
+    notional=1, mean=mean, 
+    digits=2)
+{
+  if(prob > .5) prob <- 1 - prob
+  ans <- -qnorm(prob, mean=mean, 
+    sd=sd) * notional
+  signif(ans, digits=digits)
+}
+ESnormalEqwt1 <- function(sd=sd, prob=.05, 
+    notional=1, mean=mean, 
+    digits=2)
+{
+  if(prob > .5) prob <- 1 - prob
+  v <- qnorm(prob, mean=mean, sd=sd) 
+  tailExp <- integrate(function(x) 
+      x * dnorm(x, mean=mean, sd=sd), 
+      -Inf, v)$value / prob
+  ans <- -tailExp * notional
+  signif(ans, digits=digits)
+}
+VaR1<-VaRnormalEqwt1(sd=sd_P,prob=.05,notional = 100000, mean=R_P,digits=5)
+ES1<-ESnormalEqwt1(sd=sd_P,prob=.05,notional = 100000, mean=R_P,digits=5)
+
+df_risky<-c(R_P*12,sd_P*sqrt(12),VaR1,ES1,0,effi)
+names(df_risky)<-c("Annual_Mean","Annual_SD","VaR_non","ES_non","riskfree",names(effi))
+df_risky
+```
+4.2 Calculate the efficient portfolio that has return = 6% /year or 0.5% a month ( risky assets and risk free assets, no short sales) calculate how much is invested in each assets, monthly risk, monthly 5% VaR and ES based on \$100000 investment
+```{r}
+R_P= 0.005
+# R_P=w*mufree+(1-w)*muP[ind]
+w= (R_P-muP[ind]) / (mufree-muP[ind])
+#solve w
+effi<-c(w,(1-w)*weights[ind])
+names(effi)<-c("riskfree",colnames(monthly_returns))
+#names(effi)<-c("riskfree","A","B","C")
+print(round(effi,5))
+sum(effi)
+sd_P=(1-w)*sdP[ind]
+sd_P
+```
+
+```{r}
+#calculate VaR and ES (nonparametric, historical data )
+VaRnormalEqwt1 <- function(sd=sd, prob=.05, 
+    notional=1, mean=mean, 
+    digits=2)
+{
+  if(prob > .5) prob <- 1 - prob
+  ans <- -qnorm(prob, mean=mean, 
+    sd=sd) * notional
+  signif(ans, digits=digits)
+}
+ESnormalEqwt1 <- function(sd=sd, prob=.05, 
+    notional=1, mean=mean, 
+    digits=2)
+{
+  if(prob > .5) prob <- 1 - prob
+  v <- qnorm(prob, mean=mean, sd=sd) 
+  tailExp <- integrate(function(x) 
+      x * dnorm(x, mean=mean, sd=sd), 
+      -Inf, v)$value / prob
+  ans <- -tailExp * notional
+  signif(ans, digits=digits)
+}
+VaR2<-VaRnormalEqwt1(sd=sd_P,prob=.05,notional = 100000, mean=R_P,digits=5)
+ES2<-ESnormalEqwt1(sd=sd_P,prob=.05,notional = 100000, mean=R_P,digits=5)
+
+df_risky_free<-c(R_P,sd_P,VaR2,ES2,effi)
+names(df_risky_free)<-c("Annual_Mean","Annual_SD","VaR_non","ES_non",names(effi))
+df_risky_free
+```
+4.3 Compare the VaR and ES of the efficient portfolio that has risk free assets with VAR that doesn't have risk free assets
+
+```{r}
+efficient_prt<-  as.data.frame(cbind(df_risky,df_risky_free))
+round(efficient_prt,4)
+write.csv(round(efficient_prt,4),"4 efficient_prt.csv")
+```
+
+
+## 5. Principle Component Analysis
+
+
+### Computing Correlation and PCA
+5.1 Run correlation analysis and gives answer: Compute sample correlation matrix of returns of the assets, find the most highly and least correlated assets think whether diversification will reduce risk
+
+```{r}
+# Compute the sample correlation matrix of the returns
+cor_matrix <- cor(na.omit(monthly_returns))
+library(corrplot)
+corrplot(cor_matrix,method="number")
+#?corrplot
+# Print the correlation matrix
+print(cor_matrix)
+# Find the most highly correlated pair of assets
+max_cor <- max(cor_matrix[upper.tri(cor_matrix)])
+most_correlated <- which(cor_matrix == max_cor, arr.ind = TRUE)
+# Find the least correlated pair of assets
+min_cor <- min(cor_matrix[upper.tri(cor_matrix)])
+least_correlated <- which(cor_matrix == min_cor, arr.ind = TRUE)
+# Print the results
+cat("Most highly correlated assets:", colnames(cor_matrix)[most_correlated[1]], "and", colnames(cor_matrix)[most_correlated[2]], "with correlation", max_cor, "\n")
+cat("Least correlated assets:", colnames(cor_matrix)[least_correlated[1]], "and", colnames(cor_matrix)[least_correlated[2]], "with correlation", min_cor, "\n")
+
+```
+
+5.2 Run PCA analysis and comment: run PCA analysis comment on the result of PCA
+
+```{r}
+# Principal Component Analysis (PCA)
+pca_result <- FactoMineR::PCA(monthly_returns, scale.unit = TRUE, ncp = ncol(monthly_returns), graph = FALSE)
+#?PCA
+summary(pca_result)
+```
+
+### Coding Alternative for correlation and PCA (From slides)
+```{r}
+#Compute the covariance matrix Z
+S <- cov(na.omit(monthly_returns))
+# Compute the eigen values and vectors of S
+s.eigen <- eigen(S)
+#s.eigen
+#Make a scree graph
+plot(s.eigen$values, xlab = 'Eigenvalue Number', ylab = 'Eigenvalue Size',
+main = 'Scree Graph')
+lines(s.eigen$values)
+# Find the principal componets
+monthly_returns.pca <- prcomp(na.omit(monthly_returns))
+monthly_returns.pca
+#Compute the correlation matrix and the principal components based on it
+R <- cor(na.omit(monthly_returns))
+monthly_returns.pca.scaled <- prcomp(na.omit(monthly_returns), scale = TRUE)
+monthly_returns.pca.scaled
+
+```
+
+### Computing factor Analysis
+5.3 factor analysis: run factor analysis, report number and loadings of each factors , find if there's meaningful interpretation
+
+```{r}
+# Factor Analysis
+fa_result <- factanal(factors = 3, covmat = cor_matrix)
+print(fa_result)
+```
+
+## 6. Risk Management
+6.1 Parametric methods for risk management Based on \$100000 investment , calculate 5% VAR and ES over one month of the assets and portfolios, based on normal distribution, using estimated means and variances . Find which asset has the highest and lowest VaR , and which asset has highest and lowest ES, over one month horizon as well as portflios.
+
+```{r}
+ #calculate VaR and ES (parametric, normal)
+VaRnormalEqwt <- function(returnVector, prob=.05, 
+    notional=1, expected.return=mean(returnVector), 
+    digits=2)
+{
+  if(prob > .5) prob <- 1 - prob
+  ans <- -qnorm(prob, mean=expected.return, 
+    sd=sd(returnVector)) * notional
+  signif(ans, digits=digits)
+}
+ESnormalEqwt <- function(returnVector, prob=.05, 
+    notional=1, expected.return=mean(returnVector), 
+    digits=2)
+{
+  if(prob > .5) prob <- 1 - prob
+  retsd <- sd(returnVector)
+  v <- qnorm(prob, mean=expected.return, sd=retsd) 
+  tailExp <- integrate(function(x) 
+      x * dnorm(x, mean=expected.return, sd=retsd), 
+      -Inf, v)$value / prob
+  ans <- -tailExp * notional
+  signif(ans, digits=digits)
+}
+
+
+combined_returns_df3<- combined_returns_df[-1,-1]/100
+normal_VaR_5<-sapply(combined_returns_df3 ,function(x){VaRnormalEqwt(x,prob=.05,digits=5,notional=100000)})
+normal_ES_5<-sapply(combined_returns_df3 ,function(x){ESnormalEqwt(x,prob=.05,digits=5,notional=100000)})
+```
+
+6.2 nonparametric Methods for risk management use nonparametric methods, Based on \$100000 investment , calculate 5% VAR and ES over one month of the assets and portfolios. Find which asset has the highest and lowest VaR , and which asset has highest and lowest ES, over one month horizon. as well as portfolios
+
+
+```{r}
+ #calculate VaR and ES (nonparametric, historical data )
+
+VaRhistorical <- function(returnVector, prob=.05, 
+    notional=1, digits=2) 
+{
+  if(prob > .5) prob <- 1 - prob
+  ans <- -quantile(returnVector, prob) * notional
+  signif(ans, digits=digits)
+}
+EShistorical <- function(returnVector, prob=.05, 
+    notional=1, digits=2) 
+{
+  if(prob > .5) prob <- 1 - prob
+  v <- quantile(returnVector, prob)
+  ans <- -mean(returnVector[returnVector <= v]) * 
+      notional
+  signif(ans, digits=digits)
+
+}
+combined_returns_df3<- combined_returns_df[-1,-1]/100
+nonparametric_VaR_5<-sapply(combined_returns_df3 ,function(x){VaRhistorical(x,prob=.05,digits=5,notional=100000)})
+nonparametric_ES_5<-sapply(combined_returns_df3 ,function(x){EShistorical(x,prob=.05,digits=5,notional=100000)})
+  
+
+
+```
+
+```{r}
+# Create the data frame with the updated variables
+risk_measures <- data.frame(
+                            Normal_VaR_5 = normal_VaR_5,
+                            Normal_ES_5 = normal_ES_5,
+                            Nonparametric_VaR_5 = nonparametric_VaR_5,
+                            Nonparametric_ES_5 = nonparametric_ES_5)
+print(risk_measures)
+#write.csv(risk_measures, "5_1 risk_measures.csv")
+
+
+# Find assets with the highest and lowest VaR and ES
+max_VaR <- max(risk_measures$Nonparametric_VaR_5)
+min_VaR <- min(risk_measures$Nonparametric_VaR_5)
+max_ES <- max(risk_measures$Nonparametric_ES_5)
+min_ES <- min(risk_measures$Nonparametric_ES_5)
+
+highest_VaR_asset <- rownames(risk_measures)[which.max(risk_measures$Nonparametric_VaR_5)]
+lowest_VaR_asset <- rownames(risk_measures)[which.min(risk_measures$Nonparametric_VaR_5)]
+highest_ES_asset <- rownames(risk_measures)[which.max(risk_measures$Nonparametric_ES_5)]
+lowest_ES_asset <- rownames(risk_measures)[which.min(risk_measures$Nonparametric_ES_5)]
+cat("Highest VaR asset at a one month horizon:", highest_VaR_asset, "with VaR", max_VaR, "\n")
+cat("Lowest VaR asset at a one month horizon:", lowest_VaR_asset, "with VaR", min_VaR, "\n")
+cat("Highest ES asset at a one month horizon:", highest_ES_asset, "with ES", max_ES, "\n")
+cat("Lowest ES asset at a one month horizon:", lowest_ES_asset, "with ES", min_ES, "\n")
+
+```
+```{r}
+
+#portfolio_prt
+#efficient_prt
+risk_measures_port <- add_row(merge(portfolio_prt["VaR_non",], efficient_prt["VaR_non",]),
+merge(portfolio_prt["ES_non",], efficient_prt["ES_non",]))
+rownames(risk_measures_port) <- c("VaR_non","ES_non")
+risk_measures_port<-as.data.frame(t(risk_measures_port))
+risk_measures_port
+#write.csv(risk_measures_port, "5_2 risk_measures_port.csv")
+
+max_VaR <- max(risk_measures_port$VaR_non)
+min_VaR <- min(risk_measures_port$VaR_non)
+max_ES <- max(risk_measures_port$ES_non)
+min_ES <- min(risk_measures_port$ES_non)
+
+highest_VaR_port<- rownames(risk_measures_port)[which.max(risk_measures_port$VaR_non)]
+lowest_VaR_port <- rownames(risk_measures_port)[which.min(risk_measures_port$VaR_non)]
+highest_ES_port <- rownames(risk_measures_port)[which.max(risk_measures_port$ES_non)]
+lowest_ES_port <- rownames(risk_measures_port)[which.min(risk_measures_port$ES_non)]
+
+cat("Highest VaR portfolio at a one month horizon:", highest_VaR_port, "with VaR", max_VaR, "\n")
+cat("Lowest VaR portfolio at a one month horizon:", lowest_VaR_port, "with VaR", min_VaR, "\n")
+cat("Highest ES portfolio at a one month horizon:", highest_ES_port , "with ES", max_ES, "\n")
+cat("Lowest ES portfolio at a one month horizon:", lowest_ES_port , "with ES", min_ES, "\n")
+
+```
+<!-- ```{r} -->
+<!-- # Calculate the 5% Value-at-Risk (VaR) and Expected Shortfall (ES) based on the normal distribution -->
+<!-- normal_VaR_5 <- qnorm(0.05, mean = stats$Mean, sd = stats$SD) * -100000 -->
+<!-- normal_ES_5 <- (-stats$Mean + stats$SD * dnorm(qnorm(0.05))) * -100000/ 0.05 -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- # Calculate the 5% Value-at-Risk (VaR) and Expected Shortfall (ES) using the nonparametric method (historical simulation) -->
+<!-- nonparametric_VaR_5 <- sapply(combined_returns, function(x) quantile(na.omit(x), 0.05)) * (-100000) -->
+<!-- nonparametric_ES_5 <- (sapply(combined_returns, function(x) mean(na.omit(x)[na.omit(x) < quantile(na.omit(x), 0.05)])) * (-100000)) / 0.05 -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- # Combine the results into a data frame -->
+<!-- # Add two rows with NAs to the shorter variables -->
+<!-- #normal_VaR_5 <- c(normal_VaR_5, NA, NA) -->
+<!-- #normal_ES_5 <- c(normal_ES_5, NA, NA) -->
+
+
+
+6.3 calculate Std. errors and 95% CI for 5% VaR and ES
+compute estimated std. errors, 95% CI for the 5% VaR and ES using bootstrap
+
+# ```{r}
+# #bootstrap CI and std
+# library(boot)
+# 
+# risk_measures_func <- function(data, indices) {
+#   resampled_data <- data[indices, ]
+#   nonparametric_VaR_5 <- quantile(resampled_data, 0.05)
+#   nonparametric_ES_5 <- mean(resampled_data[resampled_data < nonparametric_VaR_5])
+#   return(c(nonparametric_VaR_5, nonparametric_ES_5))
+# }
+# 
+# bootstrap_results <- boot(data = monthly_returns, statistic = risk_measures_func, R = 1000)
+# VaR_conf_int <- boot.ci(bootstrap_results, index = 1, type = "perc")
+# ES_conf_int <- boot.ci(bootstrap_results, index = 2, type = "perc")
+# VaR_standard_error <- bootstrap_results$t0[1] / sqrt(bootstrap_results$n)
+# ES_standard_error <- bootstrap_results$t0[2] / sqrt(bootstrap_results$n)
+# 
+# cat("VaR 5% Confidence Interval:", VaR_conf_int, "\n")
+# cat("ES 5% Confidence Interval:", ES_conf_int, "\n")
+# cat("VaR Standard Error:", VaR_standard_error, "\n")
+# cat("ES Standard Error:", ES_standard_error, "\n")
+# 
+# 
+# 
+# }
+# ```
+
+# 7. Copulas
+
+7.1 Use Copulas to model the joint distribution of the returns. Find which copula fits the data.
+
+See what are the implications.
+
+```{r}
+# Pseudo-observations
+u <- pobs(as.matrix(na.omit(monthly_returns)))
+
+# Fit Gaussian Copula
+gaussian_cop <- normalCopula(param = NA, dim = ncol(monthly_returns), dispstr = "un")
+gaussian_cop_fit <- fitCopula(gaussian_cop, u, method = "ml")
+gaussian_cop_fit
+
+
+# Fit Clayton Copula
+clayton_cop <- archmCopula(family="clayton",param = 2, dim = ncol(monthly_returns))
+clayton_cop_fit <- fitCopula(clayton_cop, u, method = "ml")
+clayton_cop 
+
+
+
+# Compare AIC values
+gaussian_cop_AIC <- AIC(gaussian_cop_fit)
+clayton_cop_AIC <- AIC(clayton_cop_fit)
+
+
+copula_AIC_values <- data.frame(
+  Copula = c("Gaussian", "Clayton"),
+  AIC = c(gaussian_cop_AIC, clayton_cop_AIC)
+)
+print(copula_AIC_values)
+
+```
+
+### Other Codes
+
